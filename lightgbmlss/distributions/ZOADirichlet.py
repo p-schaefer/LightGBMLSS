@@ -1,4 +1,4 @@
-from .zero_inflated import ZeroAdjustedBeta as ZeroAdjustedBeta_Torch
+from .zero_one_inflated import ZeroOneAdjustedDirichlet as ZeroOneAdjustedDirichlet_Torch
 from .distribution_utils import DistributionClass
 from ..utils import *
 
@@ -50,7 +50,7 @@ class ZODirichlet(DistributionClass):
             raise ValueError("Invalid response function. Please choose from 'exp' or 'softplus'.")
 
         # Set the Torch distribution to our Zero and One Adjusted Dirichlet.
-        distribution = ZeroOneAdjustedDirichlet
+        distribution = ZeroOneAdjustedDirichlet_Torch
         # Define which parameters are expected and their corresponding transformation.
         param_dict = {
             "concentration": response_fn_callable,

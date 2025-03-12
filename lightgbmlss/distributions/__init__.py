@@ -23,3 +23,7 @@ from . import ZABeta
 from . import ZALN
 from . import SplineFlow
 from . import Mixture
+from . import zero_one_inflated
+from . import ZOBeta
+from . import ZODirichlet
+
