@@ -8,7 +8,7 @@ from torch.distributions.utils import (
 )
 from torch.nn.functional import softplus
 
-from torch.distributions import NegativeBinomial, Poisson, Gamma, LogNormal, Beta
+from torch.distributions import NegativeBinomial, Poisson, Gamma, LogNormal, Beta, Dirichlet
 from pyro.distributions import TorchDistribution
 from pyro.distributions.util import broadcast_shape
 from pyro.distributions.util import is_identically_one, is_identically_zero
@@ -193,3 +193,153 @@ class ZeroOneAdjustedBeta(ZeroOneInflatedDistribution):
     @property
     def concentration0(self):
         return self.base_dist.concentration0
+      
+class ZeroOneAdjustedDirichlet(TorchDistribution):
+    r"""
+    A Zero and One Adjusted Dirichlet distribution.
+
+    This distribution models outcomes on a K-dimensional simplex but assigns
+    extra mass at the vertices. That is, given K (Dirichlet) concentration parameters
+    and a vector of gate probabilities (one for each vertex) with
+        sum(gate) ≤ 1,
+    the overall model is a mixture:
+    
+      • With probability gate[i] the outcome is the i-th vertex (a one-hot vector),
+      • Otherwise (with probability 1 – sum(gate)) the outcome is drawn from a Dirichlet
+        with the given concentration parameters.
+    
+    Parameters
+    ----------
+    concentration : torch.Tensor
+        Concentration parameters (shape … x K) for the Dirichlet component.
+    gate : torch.Tensor, optional
+        A tensor (shape … x K) of probabilities for each vertex. Must satisfy 0 ≤ gate_i ≤ 1
+        and sum(gate) ≤ 1.
+    gate_logits : torch.Tensor, optional
+        Alternative to gate. If provided, these logits are converted to probabilities
+        using torch.distributions’ logits_to_probs.
+    validate_args : bool, optional
+        Whether to validate input arguments.
+    """
+    arg_constraints = {
+        "concentration": constraints.positive,
+        # Note: there is no built-in constraint for a vector whose elements lie in [0,1]
+        # and whose sum is at most 1. Users must ensure this.
+    }
+    support = constraints.simplex
+
+    def __init__(self, concentration, gate=None, gate_logits=None, validate_args=None):
+        if (gate is None) == (gate_logits is None):
+            raise ValueError("Either `gate` or `gate_logits` must be specified, but not both.")
+        
+        # Broadcast concentration and gate appropriately.
+        concentration = torch.as_tensor(concentration)
+        if gate is not None:
+            gate = torch.as_tensor(gate)
+            self._gate, concentration = broadcast_all(gate, concentration)
+        else:
+            # Use provided logits to get gate probabilities.
+            gate_from_logits = logits_to_probs(torch.as_tensor(gate_logits))
+            self._gate, concentration = broadcast_all(gate_from_logits, concentration)
+        
+        # Ensure that the sum along the last dimension does not exceed 1.
+        if (self._gate.sum(dim=-1) > 1).any():
+            raise ValueError("The sum of gate values must be less than or equal to 1.")
+        
+        self.base_dist = Dirichlet(concentration, validate_args=validate_args)
+        batch_shape = self.base_dist.batch_shape
+        event_shape = self.base_dist.event_shape  # Should be (K,)
+        super().__init__(batch_shape, event_shape, validate_args)
+
+    @lazy_property
+    def gate(self):
+        return self._gate
+
+    @lazy_property
+    def continuous_weight(self):
+        # The weight of the continuous (Dirichlet) component.
+        return 1 - self.gate.sum(dim=-1)
+
+    def log_prob(self, value):
+        """
+        Computes the log density of an observation.
+
+        For an observation (vector) x:
+          • If x is a vertex, i.e. one coordinate is nearly 1 and the rest nearly 0,
+            returns log(gate_i) for that vertex.
+          • Otherwise, returns log(continuous_weight) + log_prob(x) under Dirichlet.
+        """
+        if self._validate_args:
+            self._validate_sample(value)
+            
+        eps = abs(torch.finfo(value.dtype).eps)
+        # Clamp the input to avoid numerical issues for the continuous part.
+        value_cont = value.clamp(eps, 1 - eps)
+        
+        # Identify vertices. A vertex has one coordinate ~1 and the rest ~0.
+        is_one = value >= (1 - eps)
+        is_zero = value <= eps
+        # For each sample, if exactly one coordinate is nearly one and the rest nearly zero.
+        vertex_indicator = (is_one.sum(dim=-1) == 1) & (is_zero.sum(dim=-1) == (value.size(-1) - 1))
+        
+        # Compute continuous (Dirichlet) log density.
+        lp_cont = torch.log(self.continuous_weight + eps) + self.base_dist.log_prob(value_cont)
+        
+        # For vertex samples, get the corresponding gate log-probability.
+        vertex_idx = value.argmax(dim=-1)  # (batch,)-shaped indices.
+        lp_vertex = torch.log(self.gate.gather(dim=-1, index=vertex_idx.unsqueeze(-1)) + eps).squeeze(-1)
+        
+        # Combine: use the vertex log-probability where appropriate.
+        logp = torch.where(vertex_indicator, lp_vertex, lp_cont)
+        return logp
+
+    def sample(self, sample_shape=torch.Size()):
+        """
+        Draw samples from the mixture distribution.
+
+        For each draw, a categorical decision is made:
+          • With probability gate[i] (for some i) the outcome is the vertex with 1 at
+            coordinate i.
+          • With probability continuous_weight the outcome is drawn from the Dirichlet.
+        """
+        shape = self._extended_shape(sample_shape)
+        with torch.no_grad():
+            # Form the mixture probabilities: a vector of length K+1.
+            # The first K entries are the gate-values; the last is the continuous component weight.
+            p_gate = self.gate.expand(shape)
+            p_cont = self.continuous_weight.expand(shape).unsqueeze(-1)
+            mixture_probs = torch.cat([p_gate, p_cont], dim=-1)
+            # Sample from a categorical distribution over {0,...,K} (K outcomes for vertices,
+            # outcome K for the continuous Dirichlet component).
+            cat = torch.distributions.Categorical(mixture_probs)
+            mixture_idx = cat.sample()  # Shape: shape
+            # Sample continuous outcomes.
+            cont_sample = self.base_dist.expand(shape).sample()
+            # For discrete outcomes, produce the corresponding one-hot vector.
+            k = self.gate.size(-1)
+            disc_sample = torch.nn.functional.one_hot(mixture_idx.clamp(max=k-1), num_classes=k).to(cont_sample.dtype)
+            # Combine: if mixture_idx == k, choose continuous sample; otherwise, use discrete one-hot.
+            mask = (mixture_idx == k).unsqueeze(-1)
+            sample = torch.where(mask, cont_sample, disc_sample)
+        return sample
+
+    @lazy_property
+    def mean(self):
+        """
+        Computes the overall mixture mean.
+
+        For discrete outcomes the mean is the one-hot vector (i.e. the vector of gate values when averaged).
+        Overall:
+          E[X] = (∑ₖ gateₖ * one_hotₖ) + continuous_weight * (Dirichlet mean)
+               = gate + continuous_weight.unsqueeze(-1) * base_dist.mean.
+        """
+        return self.gate + self.continuous_weight.unsqueeze(-1) * self.base_dist.mean
+
+    def expand(self, batch_shape, _instance=None):
+        new = self._get_checked_instance(type(self), _instance)
+        # Expand concentration and gate.
+        concentration = self.base_dist.concentration.expand(batch_shape + self.base_dist.event_shape)
+        gate = self.gate.expand(batch_shape + self.gate.shape[-1:])
+        new.__init__(concentration, gate=gate, validate_args=False)
+        new._validate_args = self._validate_args
+        return 
