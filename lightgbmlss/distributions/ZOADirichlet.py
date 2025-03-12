@@ -65,4 +65,6 @@ class ZOADirichlet(DistributionClass):
                          stabilization=stabilization,
                          param_dict=param_dict,
                          distribution_arg_names=list(param_dict.keys()),
+                         loss_fn=loss_fn
+                         )
                          
