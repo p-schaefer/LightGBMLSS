@@ -1,6 +1,7 @@
-from .zero_inflated import ZeroAdjustedBeta as ZeroAdjustedBeta_Torch
+from .zero_one_inflated import ZeroOneAdjustedBeta as ZeroOneAdjustedBeta_Torch
 from .distribution_utils import DistributionClass
 from ..utils import *
+
 
 class ZOBeta(DistributionClass):
     """
@@ -45,7 +46,7 @@ class ZOBeta(DistributionClass):
             raise ValueError("Invalid response function. Please choose from 'exp' or 'softplus'.")
 
         # Set the Torch distribution to our Zero and One Adjusted Beta.
-        distribution = ZeroOneAdjustedBeta
+        distribution = ZeroOneAdjustedBeta_Torch
         param_dict = {
             "concentration1": response_fn_callable,
             "concentration0": response_fn_callable,
@@ -61,4 +62,5 @@ class ZOBeta(DistributionClass):
                          stabilization=stabilization,
                          param_dict=param_dict,
                          distribution_arg_names=list(param_dict.keys()),
-                         
+                         loss_fn=loss_fn
+                         )
