@@ -2,7 +2,7 @@ from .zero_one_inflated import ZeroOneAdjustedDirichlet as ZeroOneAdjustedDirich
 from .distribution_utils import DistributionClass
 from ..utils import *
 
-class ZODirichlet(DistributionClass):
+class ZOADirichlet(DistributionClass):
     r"""
     Zero and One Adjusted Dirichlet distribution class.
 

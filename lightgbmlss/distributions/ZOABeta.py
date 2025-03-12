@@ -3,7 +3,7 @@ from .distribution_utils import DistributionClass
 from ..utils import *
 
 
-class ZOBeta(DistributionClass):
+class ZOABeta(DistributionClass):
     """
     Zero and One Adjusted Beta distribution class.
 
